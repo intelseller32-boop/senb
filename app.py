@@ -1,3 +1,5 @@
+import mimetypes
+
 @app.route("/send", methods=["POST"])
 def send():
     chat_id = request.form.get("chat_id")
@@ -28,20 +30,35 @@ def send():
     )
 
     if not msg_res.ok or not msg_res.json().get("ok"):
-        return jsonify({"ok": False, "error": "Failed to send message"}), 500
+        return jsonify({"ok": False, "error": "Message failed"}), 500
 
     # ✅ SEND FILES
     for file_key in request.files:
         file = request.files[file_key]
+
         if file.filename:
-            file_res = requests.post(
-                f"{TG_API}/sendDocument",
-                data={"chat_id": chat_id},
-                files={"document": (file.filename, file.stream)}
-            )
+            mime_type, _ = mimetypes.guess_type(file.filename)
 
-            if not file_res.ok or not file_res.json().get("ok"):
-                return jsonify({"ok": False, "error": "Failed to send file"}), 500
+            try:
+                if mime_type and mime_type.startswith("image"):
+                    # 📸 SEND AS PHOTO
+                    res = requests.post(
+                        f"{TG_API}/sendPhoto",
+                        data={"chat_id": chat_id},
+                        files={"photo": (file.filename, file.stream)}
+                    )
+                else:
+                    # 📎 SEND AS DOCUMENT
+                    res = requests.post(
+                        f"{TG_API}/sendDocument",
+                        data={"chat_id": chat_id},
+                        files={"document": (file.filename, file.stream)}
+                    )
 
-    # ✅ ONLY RETURN SUCCESS IF EVERYTHING WORKED
+                if not res.ok or not res.json().get("ok"):
+                    return jsonify({"ok": False, "error": "File upload failed"}), 500
+
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)}), 500
+
     return jsonify({"ok": True})
