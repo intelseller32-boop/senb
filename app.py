@@ -1,3 +1,10 @@
+from flask import Flask, request, jsonify
+import requests, os, logging
+
+app = Flask(__name__)
+
+TG_API = f"https://api.telegram.org/bot{os.getenv('BOT_TOKEN')}"
+
 @app.route("/send", methods=["POST"])
 def send():
     chat_id = request.form.get("chat_id")
@@ -17,23 +24,28 @@ def send():
         if key != "chat_id":
             text_lines.append(f"{key}: {request.form.get(key)}")
 
-    # ✅ SEND TEXT
-    msg_res = requests.post(
-        f"{TG_API}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": "\n".join(text_lines)
-        },
-        timeout=15
-    )
+    try:
+        msg_res = requests.post(
+            f"{TG_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "\n".join(text_lines)
+            },
+            timeout=20
+        )
 
-    if not msg_res.ok:
-        return jsonify({"error": "Failed to send message"}), 500
+        if not msg_res.ok:
+            return jsonify({
+                "error": "Failed to send message",
+                "details": msg_res.text
+            }), 500
 
-    sent = 0
-    failed = 0
+    except Exception as e:
+        logging.error(e)
+        return jsonify({"error": "Telegram request failed"}), 500
 
-    # ✅ SEND FILES ONE BY ONE
+    sent, failed = 0, 0
+
     for file_key in request.files:
         file = request.files[file_key]
 
@@ -43,7 +55,7 @@ def send():
                     f"{TG_API}/sendDocument",
                     data={"chat_id": chat_id},
                     files={"document": (file.filename, file.stream)},
-                    timeout=60
+                    timeout=20
                 )
 
                 if res.ok:
@@ -52,11 +64,11 @@ def send():
                     failed += 1
 
             except Exception as e:
-                print("File error:", e)
+                logging.error(e)
                 failed += 1
 
-    return jsonify({
-        "ok": True,
-        "sent": sent,
-        "failed": failed
-    })
+    return jsonify({"ok": True, "sent": sent, "failed": failed})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
