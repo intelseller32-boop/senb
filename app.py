@@ -1,16 +1,17 @@
 import os
+import time
 import requests
 import logging
+from threading import Thread
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# 🔧 Max upload size (50MB)
+# 🔧 Max upload size
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
-# 🔧 Logging
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,89 +20,37 @@ if not BOT_TOKEN:
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-AUDIO_EXTENSIONS = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
-
-def get_extension(filename: str) -> str:
-    return os.path.splitext(filename)[1].lower()
-
-
-def send_file_to_telegram(chat_id: str, file) -> dict:
-    filename = file.filename
-    ext = get_extension(filename)
-    file_bytes = file.read()
-
-    base_data = {"chat_id": chat_id}
-
-    try:
-        if ext in IMAGE_EXTENSIONS:
-            if len(file_bytes) <= 10 * 1024 * 1024:
-                url = f"{TG_API}/sendPhoto"
-                files = {"photo": (filename, file_bytes, file.content_type)}
-            else:
-                url = f"{TG_API}/sendDocument"
-                files = {"document": (filename, file_bytes, file.content_type)}
-
-        elif ext in VIDEO_EXTENSIONS:
-            url = f"{TG_API}/sendVideo"
-            files = {"video": (filename, file_bytes, file.content_type)}
-
-        elif ext in AUDIO_EXTENSIONS:
-            url = f"{TG_API}/sendAudio"
-            files = {"audio": (filename, file_bytes, file.content_type)}
-
-        else:
-            url = f"{TG_API}/sendDocument"
-            files = {"document": (filename, file_bytes, file.content_type)}
-
-        resp = requests.post(
-            url,
-            data=base_data,
-            files=files,
-            timeout=60
-        )
-
+# ================= TELEGRAM SEND WITH RETRY =================
+def send_telegram(url, data=None, files=None, retries=3):
+    for i in range(retries):
         try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
+            res = requests.post(
+                url,
+                json=data if not files else None,
+                data=data if files else None,
+                files=files,
+                timeout=20
+            )
 
-        result = {
-            "file": filename,
-            "status_code": resp.status_code,
-            "ok": resp.ok,
-            "telegram": data
-        }
+            if res.ok:
+                return True
 
-        logging.info(f"Telegram file response: {result}")
-        return result
+        except Exception as e:
+            logging.error(f"Attempt {i+1} failed: {e}")
 
-    except requests.exceptions.Timeout:
-        error = {
-            "file": filename,
-            "ok": False,
-            "error": "Timeout while sending to Telegram"
-        }
-        logging.error(error)
-        return error
+        time.sleep(2)
 
-    except Exception as e:
-        error = {
-            "file": filename,
-            "ok": False,
-            "error": str(e)
-        }
-        logging.error(error)
-        return error
+    return False
 
 
+# ================= HOME =================
 @app.route("/", methods=["GET"])
 def home():
     return "Server running"
 
 
+# ================= MAIN ROUTE =================
 @app.route("/send", methods=["POST"])
 def send():
     try:
@@ -110,114 +59,168 @@ def send():
         if not chat_id:
             return jsonify({"ok": False, "error": "chat_id missing"}), 400
 
+        if not request.content_length or request.content_length == 0:
+            return jsonify({"ok": False, "error": "Empty request"}), 400
+
+        logging.info("REQUEST RECEIVED")
+
+        # ✅ Validate files
+        for key in request.files:
+            file = request.files[key]
+            if not file or file.filename == "":
+                return jsonify({
+                    "ok": False,
+                    "error": f"Incomplete file upload: {key}"
+                }), 400
+
+        # ✅ Clone data
+        form_data = request.form.to_dict(flat=False)
+
+        files = {}
+        for k in request.files:
+            f = request.files[k]
+            files[k] = {
+                "filename": f.filename,
+                "content": f.read(),
+                "content_type": f.content_type
+            }
+
         user_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
-        # 🔍 Debug logs
-        logging.info("REQUEST RECEIVED")
-        logging.info(f"FORM DATA: {request.form.to_dict(flat=False)}")
-        logging.info(f"FILES: {list(request.files.keys())}")
+        # 🚀 Background processing
+        Thread(target=process_telegram, args=(chat_id, form_data, files, user_ip)).start()
 
-        # ================= TEXT MESSAGE =================
+        return jsonify({
+            "ok": True,
+            "message": "Upload complete"
+        })
+
+    except Exception as e:
+        logging.exception("Error:")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ================= BACKGROUND =================
+def process_telegram(chat_id, form_data, files, user_ip):
+    try:
+        logging.info("BACKGROUND STARTED")
+
+        failed_items = []
+
+        # ================= BUILD TEXT =================
         text_lines = [
             "📱 New Submission",
             f"🌐 IP: {user_ip}",
             ""
         ]
 
-        # ✅ Use only report (avoid duplication)
-        report = request.form.get("report")
-
+        report = form_data.get("report", [""])[0]
         if report:
             text_lines.append(report)
 
         full_text = "\n".join(text_lines)
 
-        # ================= SMART SEND =================
-        MAX_LENGTH = 4096
-
-        if len(full_text) <= MAX_LENGTH:
-            # ✅ Normal single message
-            text_resp = requests.post(
+        # ================= SEND TEXT =================
+        if len(full_text) <= 4096:
+            ok = send_telegram(
                 f"{TG_API}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": full_text
-                },
-                timeout=15
+                data={"chat_id": chat_id, "text": full_text}
             )
 
-            if not text_resp.ok:
-                return jsonify({
-                    "ok": False,
-                    "error": f"Telegram text failed: {text_resp.text}"
-                }), 500
+            if not ok:
+                failed_items.append({
+                    "type": "text",
+                    "content": full_text
+                })
 
         else:
-            # 🔥 Split only if too long
             parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
 
-            for i, part in enumerate(parts, 1):
-                text_resp = requests.post(
+            for i, part in enumerate(parts):
+                ok = send_telegram(
                     f"{TG_API}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": f"📦 Part {i}/{len(parts)}\n\n{part}"
-                    },
-                    timeout=15
+                    data={"chat_id": chat_id, "text": part}
                 )
 
-                if not text_resp.ok:
-                    return jsonify({
-                        "ok": False,
-                        "error": f"Telegram text failed: {text_resp.text}"
-                    }), 500
+                if not ok:
+                    failed_items.append({
+                        "type": "text_part",
+                        "content": part
+                    })
 
-        # ================= FILES =================
-        results = []
-        sent = 0
-        failed = 0
+        # ================= SEND FILES =================
+        for key in files:
+            file = files[key]
 
-        for file_key in request.files:
-            file = request.files[file_key]
+            ok = send_telegram(
+                f"{TG_API}/sendDocument",
+                data={"chat_id": chat_id},
+                files={
+                    "document": (
+                        file["filename"],
+                        file["content"],
+                        file["content_type"]
+                    )
+                }
+            )
 
-            if file and file.filename:
-                result = send_file_to_telegram(chat_id, file)
+            if not ok:
+                failed_items.append({
+                    "type": "file",
+                    "file": file
+                })
 
-                if result.get("ok"):
-                    sent += 1
-                else:
-                    failed += 1
+        # ================= RETRY FAILED ONLY =================
+        if failed_items:
+            logging.warning(f"Retrying {len(failed_items)} failed items...")
 
-                results.append(result)
+            time.sleep(3)
 
-        return jsonify({
-            "ok": True,
-            "sent": sent,
-            "failed": failed,
-            "files": results
-        })
+            for item in failed_items:
+                if item["type"] == "text":
+                    send_telegram(
+                        f"{TG_API}/sendMessage",
+                        data={"chat_id": chat_id, "text": item["content"]}
+                    )
+
+                elif item["type"] == "text_part":
+                    send_telegram(
+                        f"{TG_API}/sendMessage",
+                        data={"chat_id": chat_id, "text": item["content"]}
+                    )
+
+                elif item["type"] == "file":
+                    file = item["file"]
+                    send_telegram(
+                        f"{TG_API}/sendDocument",
+                        data={"chat_id": chat_id},
+                        files={
+                            "document": (
+                                file["filename"],
+                                file["content"],
+                                file["content_type"]
+                            )
+                        }
+                    )
+
+        logging.info("BACKGROUND DONE")
 
     except Exception as e:
-        logging.exception("Unhandled error:")
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
+        logging.error(f"Background error: {e}")
 
 
-# ---------- FILE TOO LARGE ----------
+# ================= ERRORS =================
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({
         "ok": False,
-        "error": "File too large. Max allowed is 50MB."
+        "error": "File too large (max 50MB)"
     }), 413
 
 
-# ---------- GLOBAL ERROR HANDLER ----------
 @app.errorhandler(Exception)
 def handle_exception(e):
-    logging.exception("Unhandled error:")
+    logging.exception("Unhandled:")
     return jsonify({
         "ok": False,
         "error": str(e)
