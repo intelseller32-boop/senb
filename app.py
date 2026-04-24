@@ -119,12 +119,11 @@ def send():
 
         # ---------- TEXT MESSAGE ----------
         text_lines = [
-            "📱 *New Submission*",
-            f"🌐 IP: `{user_ip}`",
+            "📱 New Submission",
+            f"🌐 IP: {user_ip}",
             ""
         ]
 
-        # ✅ FIX: read all form values properly
         form_dict = request.form.to_dict(flat=False)
 
         for key, values in form_dict.items():
@@ -133,7 +132,7 @@ def send():
 
             for value in values:
                 if value and str(value).strip():
-                    text_lines.append(f"*{key}:* {value}")
+                    text_lines.append(str(value))
 
         # Include report if exists
         report = request.form.get("report")
@@ -141,13 +140,12 @@ def send():
             text_lines.append("")
             text_lines.append(report)
 
-        # ---------- SEND TEXT ----------
+        # ---------- SEND TEXT (NO MARKDOWN) ----------
         text_resp = requests.post(
             f"{TG_API}/sendMessage",
             json={
                 "chat_id": chat_id,
-                "text": "\n".join(text_lines),
-                "parse_mode": "Markdown"
+                "text": "\n".join(text_lines)
             },
             timeout=15
         )
