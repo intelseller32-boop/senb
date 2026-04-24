@@ -124,7 +124,7 @@ def send():
             ""
         ]
 
-        # ✅ ONLY use report (no duplication)
+        # ✅ Use only report (avoid duplication)
         report = request.form.get("report")
 
         if report:
@@ -132,20 +132,45 @@ def send():
 
         full_text = "\n".join(text_lines)
 
-        text_resp = requests.post(
-            f"{TG_API}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": full_text
-            },
-            timeout=15
-        )
+        # ================= SMART SEND =================
+        MAX_LENGTH = 4096
 
-        if not text_resp.ok:
-            return jsonify({
-                "ok": False,
-                "error": f"Telegram text failed: {text_resp.text}"
-            }), 500
+        if len(full_text) <= MAX_LENGTH:
+            # ✅ Normal single message
+            text_resp = requests.post(
+                f"{TG_API}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": full_text
+                },
+                timeout=15
+            )
+
+            if not text_resp.ok:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Telegram text failed: {text_resp.text}"
+                }), 500
+
+        else:
+            # 🔥 Split only if too long
+            parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+
+            for i, part in enumerate(parts, 1):
+                text_resp = requests.post(
+                    f"{TG_API}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": f"📦 Part {i}/{len(parts)}\n\n{part}"
+                    },
+                    timeout=15
+                )
+
+                if not text_resp.ok:
+                    return jsonify({
+                        "ok": False,
+                        "error": f"Telegram text failed: {text_resp.text}"
+                    }), 500
 
         # ================= FILES =================
         results = []
