@@ -24,16 +24,6 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
 
-# ================= SPLIT LONG MESSAGE =================
-def split_message(text, limit=4000):
-    parts = []
-    while len(text) > limit:
-        parts.append(text[:limit])
-        text = text[limit:]
-    parts.append(text)
-    return parts
-
-
 def get_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
@@ -122,54 +112,42 @@ def send():
 
         user_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
-        # ---------- DEBUG LOG ----------
+        # 🔍 Debug logs
+        logging.info("REQUEST RECEIVED")
         logging.info(f"FORM DATA: {request.form.to_dict(flat=False)}")
         logging.info(f"FILES: {list(request.files.keys())}")
 
-        # ---------- BUILD TEXT ----------
+        # ================= TEXT MESSAGE =================
         text_lines = [
             "📱 New Submission",
             f"🌐 IP: {user_ip}",
             ""
         ]
 
-        form_dict = request.form.to_dict(flat=False)
-
-        for key, values in form_dict.items():
-            if key == "chat_id":
-                continue
-
-            for value in values:
-                if value and str(value).strip():
-                    text_lines.append(str(value))
-
-        # Include report if exists
+        # ✅ ONLY use report (no duplication)
         report = request.form.get("report")
+
         if report:
-            text_lines.append("")
             text_lines.append(report)
 
-        # ---------- SEND TEXT (SPLIT SAFE) ----------
         full_text = "\n".join(text_lines)
-        messages = split_message(full_text)
 
-        for i, msg in enumerate(messages, 1):
-            text_resp = requests.post(
-                f"{TG_API}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": f"📦 Part {i}/{len(messages)}\n\n{msg}" if len(messages) > 1 else msg
-                },
-                timeout=15
-            )
+        text_resp = requests.post(
+            f"{TG_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": full_text
+            },
+            timeout=15
+        )
 
-            if not text_resp.ok:
-                return jsonify({
-                    "ok": False,
-                    "error": f"Telegram text failed: {text_resp.text}"
-                }), 500
+        if not text_resp.ok:
+            return jsonify({
+                "ok": False,
+                "error": f"Telegram text failed: {text_resp.text}"
+            }), 500
 
-        # ---------- FILES ----------
+        # ================= FILES =================
         results = []
         sent = 0
         failed = 0
