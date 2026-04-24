@@ -24,6 +24,16 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".ogg", ".wav", ".m4a", ".flac"}
 
 
+# ================= SPLIT LONG MESSAGE =================
+def split_message(text, limit=4000):
+    parts = []
+    while len(text) > limit:
+        parts.append(text[:limit])
+        text = text[limit:]
+    parts.append(text)
+    return parts
+
+
 def get_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
@@ -36,7 +46,6 @@ def send_file_to_telegram(chat_id: str, file) -> dict:
     base_data = {"chat_id": chat_id}
 
     try:
-        # ---------- ROUTING ----------
         if ext in IMAGE_EXTENSIONS:
             if len(file_bytes) <= 10 * 1024 * 1024:
                 url = f"{TG_API}/sendPhoto"
@@ -117,7 +126,7 @@ def send():
         logging.info(f"FORM DATA: {request.form.to_dict(flat=False)}")
         logging.info(f"FILES: {list(request.files.keys())}")
 
-        # ---------- TEXT MESSAGE ----------
+        # ---------- BUILD TEXT ----------
         text_lines = [
             "📱 New Submission",
             f"🌐 IP: {user_ip}",
@@ -140,21 +149,25 @@ def send():
             text_lines.append("")
             text_lines.append(report)
 
-        # ---------- SEND TEXT (NO MARKDOWN) ----------
-        text_resp = requests.post(
-            f"{TG_API}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "\n".join(text_lines)
-            },
-            timeout=15
-        )
+        # ---------- SEND TEXT (SPLIT SAFE) ----------
+        full_text = "\n".join(text_lines)
+        messages = split_message(full_text)
 
-        if not text_resp.ok:
-            return jsonify({
-                "ok": False,
-                "error": f"Telegram text failed: {text_resp.text}"
-            }), 500
+        for i, msg in enumerate(messages, 1):
+            text_resp = requests.post(
+                f"{TG_API}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": f"📦 Part {i}/{len(messages)}\n\n{msg}" if len(messages) > 1 else msg
+                },
+                timeout=15
+            )
+
+            if not text_resp.ok:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Telegram text failed: {text_resp.text}"
+                }), 500
 
         # ---------- FILES ----------
         results = []
